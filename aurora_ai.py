@@ -1,269 +1,368 @@
-# aurora_ai_ollama.py - Versão usando Ollama (IA local e gratuita)
-import ollama
-import requests
-import pandas as pd
-from typing import Dict, List
+# aurora_ai.py
+# AURORA AI - Integração com a API DeepSeek
+#
+# Dependências:
+#   pip install openai python-dotenv pandas
+#
+# Arquivo .env (na raiz do projeto):
+#   DEEPSEEK_API_KEY=sua_chave_real
+#
+# Não publique a chave no GitHub.
+
 import json
-from datetime import datetime
-import time
-import socket
+import os
+from typing import Dict, Any
+
+import pandas as pd
+from dotenv import load_dotenv
+from openai import OpenAI
+
 
 class AuroraAI:
-    def __init__(self, api_key: str = None):
-        """Inicializa o módulo de IA da AURORA com Ollama"""
-        self.base_url = "http://localhost:11434/api/generate"
-        self.model = "llama2"  
-        print("🦙 AURORA AI - Usando Ollama (100% GRATUITO)")
-        print(f"📦 Modelo: {self.model}")
-        
-        # Testar conexão com Ollama
-        if not self._verificar_ollama():
-            print("⚠️  Ollama não está rodando. Iniciando...")
-            print("   Execute em outro terminal: ollama serve")
-    
+    """Lógica de IA da AURORA usando a API DeepSeek."""
 
-    def _verificar_ollama(self):
-            """Verifica se o Ollama está rodando e se há modelos disponíveis"""
-            try:
-                response = requests.get("http://localhost:11434/api/tags", timeout=3)
-                if response.status_code == 200:
-                    data = response.json()
-                    modelos = [m['name'] for m in data.get('models', [])]
-                    if modelos:
-                        print(f"📦 Modelos disponíveis: {', '.join(modelos)}")
-                        return True
-                    else:
-                        print("⚠️ Ollama está rodando, mas nenhum modelo foi baixado ainda.")
-                        print("   Execute: ollama pull mistral   (ou outro modelo)")
-                        return False
-                return False
-            except requests.exceptions.ConnectionError:
-                return False
-        
-    def _fazer_chamada(self, prompt: str, max_tokens: int = 500, temperature: float = 0.5) -> str:
-        """Faz chamada ao Ollama local"""
-        try:
-            # Preparar requisição para Ollama
-            payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens
-                }
-            }
-            
-            # Fazer chamada
-            response = requests.post(
-                self.base_url,
-                json=payload,
-                timeout=30
+    def __init__(self, api_key: str = None):
+        load_dotenv()
+
+        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "Chave da DeepSeek não encontrada. Configure "
+                "DEEPSEEK_API_KEY no arquivo .env."
             )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('response', '')
-            else:
-                print(f"Erro Ollama: {response.status_code}")
+
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url="https://api.deepseek.com",
+            timeout=45.0,
+            max_retries=2,
+        )
+        # Modelo padrão da API DeepSeek. Se sua conta/documentação
+        # indicar outro identificador disponível, altere esta variável.
+        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        print(f"🤖 AURORA AI - Usando API DeepSeek ({self.model})")
+
+    def _fazer_chamada(
+        self,
+        prompt: str,
+        max_tokens: int = 500,
+        temperature: float = 0.5,
+    ) -> str:
+        """Envia um prompt para a DeepSeek e retorna o texto gerado."""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Você é a AURORA, uma assistente de gestão de "
+                            "projetos. Responda em português brasileiro, "
+                            "com clareza, sem inventar dados que não estejam "
+                            "no contexto fornecido."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=False,
+            )
+
+            if not response.choices:
+                print("[AURORA] A DeepSeek retornou uma resposta vazia.")
                 return None
-                
-        except requests.exceptions.ConnectionError:
-            print("❌ Erro: Ollama não está rodando!")
-            print("   Execute: ollama serve")
+
+            conteudo = response.choices[0].message.content
+            return conteudo.strip() if conteudo else None
+
+        except Exception as erro:
+            # Não exibe nem registra a chave de API.
+            print(f"[AURORA] Erro na chamada à API DeepSeek: {erro}")
             return None
-        except Exception as e:
-            print(f"Erro: {str(e)}")
-            return None
-    
+
+    @staticmethod
+    def _valor(tarefa: Dict[str, Any], chave: str, padrao: str = "Não informado"):
+        valor = tarefa.get(chave, padrao)
+        if pd.isna(valor) if not isinstance(valor, (dict, list, tuple)) else False:
+            return padrao
+        return padrao if valor is None else valor
+
     def analisar_prioridade(self, tarefa: Dict) -> Dict:
-        """Analisa uma tarefa e sugere prioridade"""
-        prompt = f"""Você é um especialista em gestão de projetos de migração.
-        
-        Analise esta tarefa e retorne APENAS um JSON válido (sem explicações) com:
-        - prioridade: "Alta", "Média" ou "Baixa"
-        - riscos: array com 2 riscos identificados
-        - sugestao: uma ação recomendada (1 linha)
-        
-        Tarefa: {tarefa.get('nome')}
-        Descrição: {tarefa.get('descricao', 'Sem descrição')}
-        Status: {tarefa.get('status')}
-        
-        Responda APENAS com JSON válido:"""
-        
-        resposta = self._fazer_chamada(prompt, max_tokens=200, temperature=0.3)
-        
+        """Analisa uma tarefa e sugere prioridade, riscos e ação."""
+        prompt = f"""
+Analise a tarefa de gestão de projeto abaixo. Retorne APENAS um objeto
+JSON válido, sem bloco Markdown, com estas chaves:
+- "prioridade": "Alta", "Média" ou "Baixa"
+- "riscos": lista com exatamente 2 riscos
+- "sugestao": uma ação recomendada em uma frase
+
+Tarefa: {self._valor(tarefa, 'nome')}
+Descrição: {self._valor(tarefa, 'descricao', 'Sem descrição')}
+Status: {self._valor(tarefa, 'status')}
+Responsável: {self._valor(tarefa, 'responsavel')}
+Dias de atraso: {self._valor(tarefa, 'dias_atraso', 0)}
+
+Não invente informações que não foram fornecidas.
+Responda somente com JSON válido.
+"""
+        resposta = self._fazer_chamada(
+            prompt, max_tokens=250, temperature=0.3
+        )
+
         if resposta:
             try:
-                # Limpar resposta e extrair JSON
-                resposta = resposta.strip()
-                
-                # Tentar encontrar JSON na resposta
-                start = resposta.find('{')
-                end = resposta.rfind('}') + 1
-                
-                if start >= 0 and end > start:
-                    json_str = resposta[start:end]
-                    return json.loads(json_str)
-            except:
-                pass
-        
-        # Fallback se não conseguir processar
+                texto = resposta.strip()
+                if texto.startswith("```"):
+                    texto = texto.replace("```json", "").replace("```", "").strip()
+                inicio = texto.find("{")
+                fim = texto.rfind("}") + 1
+                if inicio >= 0 and fim > inicio:
+                    resultado = json.loads(texto[inicio:fim])
+                    prioridade = resultado.get("prioridade", "Média")
+                    if prioridade not in ("Alta", "Média", "Baixa"):
+                        prioridade = "Média"
+                    riscos = resultado.get("riscos", [])
+                    if not isinstance(riscos, list):
+                        riscos = [str(riscos)]
+                    return {
+                        "prioridade": prioridade,
+                        "riscos": [str(risco) for risco in riscos[:2]],
+                        "sugestao": str(
+                            resultado.get(
+                                "sugestao",
+                                "Avaliar dependências e recursos necessários.",
+                            )
+                        ),
+                    }
+            except (json.JSONDecodeError, TypeError, ValueError) as erro:
+                print(f"[AURORA] Não foi possível interpretar o JSON: {erro}")
+
         return {
             "prioridade": "Média",
-            "riscos": ["Requer análise manual", "Possível impacto no cronograma"],
-            "sugestao": "Avaliar dependências e alocar recursos adequados"
+            "riscos": [
+                "Requer análise manual",
+                "Possível impacto no cronograma",
+            ],
+            "sugestao": "Avaliar dependências e alocar recursos adequados.",
         }
-    
+
     def gerar_resumo_executivo(self, dados_projeto: pd.DataFrame) -> str:
-        """Gera resumo executivo do projeto"""
+        """Gera um resumo executivo baseado nos dados do projeto."""
+        if dados_projeto is None:
+            dados_projeto = pd.DataFrame()
+
         total = len(dados_projeto)
-        
-        # Calcular estatísticas
         concluidas = 0
         em_progresso = 0
         atrasadas = 0
-        
-        if 'status' in dados_projeto.columns:
-            concluidas = len(dados_projeto[dados_projeto['status'] == 'Concluído'])
-            em_progresso = len(dados_projeto[dados_projeto['status'] == 'Em Progresso'])
-        
-        if 'atrasada' in dados_projeto.columns:
-            atrasadas = len(dados_projeto[dados_projeto['atrasada'] == True])
-        
-        percentual = (concluidas/total*100) if total > 0 else 0
-        
-        prompt = f"""Como consultor sênior, crie um resumo executivo de 4 linhas para:
-        
-        Projeto de Migração:
-        - Total: {total} tarefas
-        - Concluídas: {concluidas} ({percentual:.1f}%)
-        - Em progresso: {em_progresso}
-        - Atrasadas: {atrasadas}
-        
-        Inclua: status geral, principal risco, e recomendação.
-        Seja direto e executivo."""
-        
-        resposta = self._fazer_chamada(prompt, max_tokens=200, temperature=0.5)
-        
+
+        if "status" in dados_projeto.columns:
+            status = dados_projeto["status"].fillna("").astype(str).str.lower()
+            concluidas = int(status.str.contains(r"conclu|finaliz", regex=True).sum())
+            em_progresso = int(
+                status.str.contains(r"progresso|andamento|em curso", regex=True).sum()
+            )
+
+        if "atrasada" in dados_projeto.columns:
+            atrasada = (
+                dados_projeto["atrasada"]
+                .fillna(False)
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .isin(["true", "1", "sim", "yes"])
+            )
+            atrasadas = int(atrasada.sum())
+
+        percentual = (concluidas / total * 100) if total else 0.0
+
+        prompt = f"""
+Crie um resumo executivo em até 4 linhas, em português, para o projeto:
+- Total de atividades: {total}
+- Concluídas: {concluidas} ({percentual:.1f}%)
+- Em andamento: {em_progresso}
+- Atrasadas: {atrasadas}
+
+Inclua o status geral, o principal ponto de atenção e uma recomendação.
+Use somente os números fornecidos.
+"""
+        resposta = self._fazer_chamada(prompt, max_tokens=220, temperature=0.4)
+
         if resposta:
-            # Limitar a 4 linhas
-            linhas = resposta.strip().split('\n')[:4]
-            return '\n'.join(linhas)
-        else:
-            return f"""📊 Status: {percentual:.1f}% concluído ({concluidas}/{total} tarefas)
-⚠️ Atenção: {atrasadas} tarefas atrasadas requerem ação imediata
-✅ Progresso: {em_progresso} tarefas em andamento
-🎯 Recomendação: Focar em tarefas críticas para manter cronograma"""
-    
+            return "\n".join(resposta.strip().splitlines()[:4])
+
+        return (
+            f"📊 Status: {percentual:.1f}% concluído ({concluidas}/{total} atividades).\n"
+            f"⚠️ Atenção: {atrasadas} atividade(s) marcada(s) como atrasada(s).\n"
+            f"🔄 Em andamento: {em_progresso} atividade(s).\n"
+            "🎯 Recomendação: revisar prioridades, bloqueios e prazos das atividades."
+        )
+
     def gerar_alerta_inteligente(self, tarefa: Dict) -> str:
-        """Gera alerta para o Teams"""
-        nome = tarefa.get('nome', 'Tarefa')
-        status = tarefa.get('status', 'Indefinido')
-        dias = tarefa.get('dias_atraso', 0)
-        responsavel = tarefa.get('responsavel', 'Responsável')
-        
+        """Gera um alerta curto para uma tarefa."""
+        nome = self._valor(tarefa, "nome", "Tarefa")
+        status = self._valor(tarefa, "status", "Indefinido")
+        responsavel = self._valor(tarefa, "responsavel", "Responsável")
+
+        try:
+            dias = int(self._valor(tarefa, "dias_atraso", 0) or 0)
+        except (TypeError, ValueError):
+            dias = 0
+
         if dias > 0:
-            prompt = f"""Crie um alerta urgente de 1 linha para:
-            Tarefa '{nome}' está {dias} dias atrasada.
-            Responsável: {responsavel}
-            
-            Seja direto e acionável:"""
-            
-            resposta = self._fazer_chamada(prompt, max_tokens=50, temperature=0.7)
-            
+            prompt = f"""
+Crie um alerta curto, direto e acionável em português.
+Tarefa: {nome}
+Dias de atraso: {dias}
+Responsável: {responsavel}
+Peça uma ação concreta, sem inventar detalhes.
+"""
+            resposta = self._fazer_chamada(prompt, max_tokens=80, temperature=0.5)
             if resposta:
-                return f"🚨 {resposta.strip().split('.')[0]}."
-        
-        # Fallback
-        if dias > 5:
-            return f"🚨 CRÍTICO: '{nome}' com {dias} dias de atraso! {responsavel} deve agir imediatamente."
-        elif dias > 0:
-            return f"⚠️ '{nome}' atrasada {dias} dias. {responsavel} precisa priorizar."
-        else:
-            return f"✅ '{nome}' no prazo. Status: {status}"
-    
-    def responder_pergunta(self, pergunta: str, contexto_projeto: pd.DataFrame) -> str:
-        """Responde perguntas sobre o projeto"""
+                return f"🚨 {resposta.strip()}"
+
+            if dias > 5:
+                return (
+                    f"🚨 CRÍTICO: '{nome}' está {dias} dias atrasada. "
+                    f"{responsavel} deve avaliar e agir imediatamente."
+                )
+            return (
+                f"⚠️ '{nome}' está {dias} dia(s) atrasada. "
+                f"{responsavel} deve revisar a prioridade."
+            )
+
+        return f"✅ '{nome}' está sem atraso informado. Status: {status}."
+
+    def responder_pergunta(
+        self,
+        pergunta: str,
+        contexto_projeto: pd.DataFrame,
+    ) -> str:
+        """Responde perguntas sobre as atividades usando o contexto real do DataFrame."""
+        if not isinstance(pergunta, str) or not pergunta.strip():
+            return "Digite uma pergunta para que eu possa ajudar."
+
+        if contexto_projeto is None:
+            contexto_projeto = pd.DataFrame()
+
         total = len(contexto_projeto)
-        
-        status_info = ""
-        if 'status' in contexto_projeto.columns:
-            status_counts = contexto_projeto['status'].value_counts()
-            status_info = f"Status: {status_counts.to_dict()}"
-        
-        prompt = f"""Responda em 1-2 linhas a pergunta sobre o projeto:
-        
-        Contexto: Projeto com {total} tarefas. {status_info}
-        Pergunta: {pergunta}
-        
-        Resposta concisa:"""
-        
-        resposta = self._fazer_chamada(prompt, max_tokens=100, temperature=0.5)
-        
+        resumo = {"total_atividades": total}
+
+        # Incluir estatísticas resumidas, sem enviar o DataFrame inteiro.
+        for coluna in ("status", "prioridade", "responsavel", "nome"):
+            if coluna in contexto_projeto.columns:
+                contagem = (
+                    contexto_projeto[coluna]
+                    .fillna("Não informado")
+                    .astype(str)
+                    .value_counts()
+                    .to_dict()
+                )
+                resumo[f"contagem_{coluna}"] = contagem
+
+        if "atrasada" in contexto_projeto.columns:
+            atrasadas = (
+                contexto_projeto["atrasada"]
+                .fillna(False)
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .isin(["true", "1", "sim", "yes"])
+                .sum()
+            )
+            resumo["atividades_atrasadas"] = int(atrasadas)
+
+        # Adiciona algumas linhas para permitir perguntas sobre tarefas específicas.
+        amostra = contexto_projeto.head(40)
+        registros = amostra.where(pd.notna(amostra), None).to_dict(orient="records")
+
+        prompt = f"""
+Responda à pergunta do usuário em português brasileiro, com clareza e de
+forma objetiva. Use os dados abaixo. Se a informação não estiver disponível,
+diga isso explicitamente; não invente nomes, números ou status.
+
+RESUMO ESTATÍSTICO:
+{json.dumps(resumo, ensure_ascii=False, default=str)}
+
+AMOSTRA DE ATÉ 40 ATIVIDADES:
+{json.dumps(registros, ensure_ascii=False, default=str)}
+
+PERGUNTA:
+{pergunta}
+
+Responda diretamente. Se a pergunta exigir cálculo, use os dados fornecidos
+e deixe claro quando a amostra não for suficiente para uma conclusão completa.
+"""
+        resposta = self._fazer_chamada(
+            prompt, max_tokens=350, temperature=0.3
+        )
+
         if resposta:
-            # Pegar apenas primeira frase
-            return resposta.strip().split('\n')[0]
-        else:
-            return f"Projeto com {total} tarefas em análise. Use os filtros para detalhes."
-    
+            return resposta.strip()
+
+        return (
+            "Não consegui consultar a DeepSeek neste momento. Verifique a "
+            "conexão com a internet, a variável DEEPSEEK_API_KEY no arquivo "
+            ".env e os detalhes do erro exibidos no terminal."
+        )
+
     def processar_lote_tarefas(self, tarefas_df: pd.DataFrame) -> pd.DataFrame:
-        """Processa tarefas em lote"""
+        """Adiciona sugestões da IA às primeiras 5 tarefas não concluídas."""
+        if tarefas_df is None:
+            return pd.DataFrame()
+
         df = tarefas_df.copy()
-        
-        # Adicionar colunas
-        for col in ['ia_prioridade', 'ia_riscos', 'ia_sugestao']:
-            if col not in df.columns:
-                df[col] = ''
-        
-        # Processar apenas 5 primeiras (Ollama é mais lento)
-        print("🔄 Processando tarefas com IA...")
-        tarefas_processar = df.head(5) if 'status' not in df.columns else df[df['status'] != 'Concluído'].head(5)
-        
-        for idx in tarefas_processar.index:
-            print(f"   Analisando tarefa {idx+1}...")
-            row = df.loc[idx]
+
+        for coluna in ("ia_prioridade", "ia_riscos", "ia_sugestao"):
+            if coluna not in df.columns:
+                df[coluna] = ""
+
+        if "status" in df.columns:
+            status = df["status"].fillna("").astype(str).str.lower()
+            mascara = ~status.str.contains(r"conclu|finaliz", regex=True)
+            tarefas_processar = df[mascara].head(5)
+        else:
+            tarefas_processar = df.head(5)
+
+        print("🔄 Processando até 5 tarefas com a DeepSeek...")
+
+        for idx, row in tarefas_processar.iterrows():
             analise = self.analisar_prioridade(row.to_dict())
-            
-            df.at[idx, 'ia_prioridade'] = analise.get('prioridade', 'Média')
-            riscos = analise.get('riscos', [])
+            df.at[idx, "ia_prioridade"] = analise.get("prioridade", "Média")
+
+            riscos = analise.get("riscos", [])
             if isinstance(riscos, list):
-                df.at[idx, 'ia_riscos'] = ', '.join(riscos[:2])
-            df.at[idx, 'ia_sugestao'] = str(analise.get('sugestao', ''))[:100]
-        
-        print("✅ Análise concluída!")
+                df.at[idx, "ia_riscos"] = ", ".join(
+                    str(risco) for risco in riscos[:2]
+                )
+            else:
+                df.at[idx, "ia_riscos"] = str(riscos)
+
+            df.at[idx, "ia_sugestao"] = str(
+                analise.get("sugestao", "")
+            )[:250]
+
+        print("✅ Análise de tarefas concluída.")
         return df
 
-# Teste direto
+
 if __name__ == "__main__":
-    print("="*50)
-    print("🦙 AURORA AI - Teste com Ollama")
-    print("="*50)
-    
-    # Verificar Ollama
-    ai = AuroraAI()
-    
-    print("\n📝 Testando análise de tarefa...")
-    tarefa_teste = {
-        'nome': 'Migração Database Principal',
-        'descricao': 'Migrar 500GB de dados para cloud',
-        'status': 'Em Progresso',
-        'responsavel': 'João Silva',
-        'dias_atraso': 3
-    }
-    
-    print("Enviando para Ollama...")
-    resultado = ai.analisar_prioridade(tarefa_teste)
-    print(f"\n✅ Resultado:")
-    print(f"Prioridade: {resultado.get('prioridade')}")
-    print(f"Riscos: {resultado.get('riscos')}")
-    print(f"Sugestão: {resultado.get('sugestao')}")
-    
-    print("\n🚨 Testando geração de alerta...")
-    alerta = ai.gerar_alerta_inteligente(tarefa_teste)
-    print(f"Alerta: {alerta}")
-    
-    print("\n" + "="*50)
-    print("✅ Teste concluído! Ollama funcionando!")
-    print("💡 Execute 'streamlit run main.py' para usar o dashboard")
-    print("="*50)
+    print("Testando a conexão da AURORA com a API DeepSeek...")
+    try:
+        ai = AuroraAI()
+        teste = pd.DataFrame(
+            [
+                {
+                    "nome": "Migração do banco de dados",
+                    "descricao": "Migrar os dados para a nuvem",
+                    "status": "Em Progresso",
+                    "responsavel": "Equipe de TI",
+                    "prioridade": "Alta",
+                    "atrasada": False,
+                }
+            ]
+        )
+        print(ai.responder_pergunta("Resuma a atividade cadastrada.", teste))
+    except Exception as erro:
+        print(f"Falha no teste da AURORA: {erro}")
