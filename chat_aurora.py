@@ -89,8 +89,6 @@ def pagina_chat_ia(df, ai):
         ai: Instância da classe AuroraAI.
     """
 
-    st.title("🤖 Chat com AURORA IA")
-
     st.markdown(
         """
         Converse com a inteligência artificial da AURORA para
