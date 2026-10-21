@@ -14,6 +14,7 @@ import os
 from typing import Dict, Any
 
 import pandas as pd
+import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -22,14 +23,31 @@ class AuroraAI:
     """Lógica de IA da AURORA usando a API DeepSeek."""
 
     def __init__(self, api_key: str = None):
+        # Carrega o .env se existir; não é obrigatório no Streamlit Cloud.
         load_dotenv()
 
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-        if not self.api_key:
+        # 1. Tenta usar a chave recebida como argumento.
+        chave = api_key
+
+        # 2. Tenta obter a chave dos Secrets do Streamlit.
+        if not chave:
+            try:
+                chave = st.secrets.get("DEEPSEEK_API_KEY")
+            except (FileNotFoundError, KeyError):
+                chave = None
+
+        # 3. Tenta obter a chave das variáveis de ambiente.
+        if not chave:
+            chave = os.getenv("DEEPSEEK_API_KEY")
+
+        if not chave:
             raise ValueError(
                 "Chave da DeepSeek não encontrada. Configure "
-                "DEEPSEEK_API_KEY no arquivo .env."
+                "DEEPSEEK_API_KEY em Streamlit Secrets ou nas "
+                "variáveis de ambiente."
             )
+
+        self.api_key = chave
 
         self.client = OpenAI(
             api_key=self.api_key,
@@ -37,9 +55,9 @@ class AuroraAI:
             timeout=45.0,
             max_retries=2,
         )
-        # Modelo padrão da API DeepSeek. Se sua conta/documentação
-        # indicar outro identificador disponível, altere esta variável.
+
         self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
         print(f"🤖 AURORA AI - Usando API DeepSeek ({self.model})")
 
     def _fazer_chamada(

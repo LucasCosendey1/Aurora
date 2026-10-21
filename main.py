@@ -1,5 +1,6 @@
 # main.py - Arquivo principal da AURORA
 
+import os
 import pandas as pd
 import streamlit as st
 from datetime import datetime
@@ -16,7 +17,19 @@ st.set_page_config(
     layout="wide",
 )
 
+# Carrega o .env quando existir, sem exigir esse arquivo no Streamlit Cloud.
 load_dotenv()
+
+# Busca a chave configurada no Streamlit Secrets ou nas variáveis de ambiente.
+try:
+    DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY", "")
+except (FileNotFoundError, KeyError):
+    DEEPSEEK_API_KEY = ""
+
+DEEPSEEK_API_KEY = (
+    DEEPSEEK_API_KEY
+    or os.getenv("DEEPSEEK_API_KEY", "")
+)
 
 
 # ============================================================
